@@ -1,12 +1,13 @@
 """Runs one CSV of test cases against a real backend (local or deployed) over
-plain HTTP - the same /foundry/generate (and, for pipeline_path=regeneration,
-/foundry/retry) endpoints the real chat UI calls, just scripted. Each input
-row produces 1 output row (pipeline_path=generation, the default) or 2
-(pipeline_path=regeneration - one for the generate call, one for the retry).
+plain HTTP - the same /foundry/generate (and, for type=query, /foundry/retry
+right after) endpoints the real chat UI calls, just scripted. type=query
+always produces 2 output rows (one generate, one regenerate); any other type
+(e.g. conversation) produces just 1 (generate only) - not driven by an input
+column, no pipeline_path field in the CSV at all.
 
-`version` isn't a column in the input file - it's supplied by the caller at
-run time (watch_and_run.py derives it from the CSV's own filename) and
-stamped onto every output row for that run."""
+`version` isn't a column in the input file either - it's supplied by the
+caller at run time (gui_run.py) and stamped onto every output row for that
+run."""
 import time
 import uuid
 from typing import Any, Dict, List
@@ -60,11 +61,11 @@ def _base_fields(version: str, row: Dict[str, str]) -> Dict[str, str]:
 
 
 def _build_row(
-    base: Dict[str, str], call_type: str, generated_answer: str, actual_sources: str,
+    base: Dict[str, str], pipeline_path: str, generated_answer: str, actual_sources: str,
     time_taken: Any, error: str = "",
 ) -> Dict[str, Any]:
     result_row = {
-        **base, "call_type": call_type, "generated_answer": generated_answer,
+        **base, "pipeline_path": pipeline_path, "generated_answer": generated_answer,
         "actual_sources": actual_sources, "llm_score": "", "llm_comments": "",
         "time_taken_seconds": time_taken, "error": error,
     }
@@ -80,10 +81,10 @@ def _build_row(
 
 def run_test_case(base_url: str, token: str, version: str, row: Dict[str, str]) -> List[Dict[str, Any]]:
     base = _base_fields(version, row)
-    pipeline_path = (row.get("pipeline_path") or "generation").strip().lower()
+    is_query = base["type"].lower() == "query"
 
     if not base["question"] or not base["expected_answer"]:
-        return [_build_row(base, pipeline_path, "", "", "", "missing question or expected_answer - skipped")]
+        return [_build_row(base, "generation", "", "", "", "missing question or expected_answer - skipped")]
 
     start = time.perf_counter()
     try:
@@ -102,7 +103,7 @@ def run_test_case(base_url: str, token: str, version: str, row: Dict[str, str]) 
     time_taken = gen_response.get("total_time_taken")
     results = [_build_row(base, "generation", generated_answer, actual_sources, time_taken)]
 
-    if pipeline_path != "regeneration":
+    if not is_query:
         return results
 
     start2 = time.perf_counter()
