@@ -1,0 +1,4 @@
+version,type,pipeline_path,question,expected_answer,expected_source,remarks
+sample_test_cases,query,generation,What is Two Men and a Truck?,A franchised moving and moving-related services company helping customers with local and long-distance moves.,,
+sample_test_cases,query,regeneration,What is the staffing matrix used for?,It is used to estimate staffing needs.,,
+sample_test_cases,conversation,generation,hi there,A friendly greeting response mentioning Two Men and a Truck.,,accept any polite greeting back

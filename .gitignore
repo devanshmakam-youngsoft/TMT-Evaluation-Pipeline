@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+
+incoming/*.csv
+incoming/processed/
+reports/*.csv
