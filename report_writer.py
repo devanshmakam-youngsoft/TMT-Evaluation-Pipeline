@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 REPORT_COLUMNS = [
-    "version", "type", "pipeline_path", "question", "expected_answer", "expected_source",
+    "slno", "version", "type", "pipeline_path", "question", "expected_answer", "expected_source",
     "generated_answer", "actual_sources", "llm_score", "llm_comments",
     "time_taken_seconds", "error",
 ]

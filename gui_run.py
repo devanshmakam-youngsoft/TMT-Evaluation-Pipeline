@@ -12,11 +12,12 @@ import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+from typing import Dict, List
 
 from .auth_client import login
 from .config import REPORTS_DIR
 from .report_writer import write_report
-from .runner import run_test_cases
+from .runner import derive_judge_rate_limit, run_test_cases
 from .scoring import warm_up_client
 
 _HERE = Path(__file__).resolve().parent
@@ -25,6 +26,19 @@ _DEFAULT_MASTER_FILE = _HERE / "master.csv"
 
 _LOCAL_URL = "http://localhost:8014"
 _DEPLOYED_URL = "https://ca-tmt-dolly-backend-dev.politemeadow-bb00a646.centralus.azurecontainerapps.io/api"
+
+
+def _read_test_case_csv(path: Path) -> List[Dict[str, str]]:
+    """Excel saves CSV as Windows-1252 by default on save (not UTF-8) unless
+    the user explicitly picks "CSV UTF-8" - a real, recurring issue for a
+    file edited/maintained in Excel. Try UTF-8 first (handles a BOM too),
+    fall back to cp1252 rather than crashing the whole run over it."""
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+    except UnicodeDecodeError:
+        with open(path, newline="", encoding="cp1252") as f:
+            return list(csv.DictReader(f))
 
 
 def _load_settings() -> dict:
@@ -86,6 +100,7 @@ class EvalRunnerApp:
         self.master_file = tk.StringVar(value=settings.get("master_file", str(_DEFAULT_MASTER_FILE)))
         self.target = tk.StringVar(value="deployed")
         self.version = tk.StringVar(value=datetime.now().strftime("run_%Y%m%d_%H%M%S"))
+        self.judge_rate_limit_rpm = None
 
         pad = {"padx": 10, "pady": 6}
 
@@ -118,8 +133,9 @@ class EvalRunnerApp:
 
     def _warm_up(self) -> None:
         try:
-            warm_up_client()
-            self.root.after(0, self._log, "Judge client ready.")
+            requests_per_minute, tokens_per_minute = warm_up_client()
+            self.judge_rate_limit_rpm = derive_judge_rate_limit(requests_per_minute, tokens_per_minute)
+            self.root.after(0, self._log, f"Judge client ready. Detected rate limit -> pacing at {self.judge_rate_limit_rpm:.0f} req/min.")
         except Exception as exc:
             self.root.after(0, self._log, f"Judge client warm-up failed (will retry on first use): {exc}")
 
@@ -152,11 +168,14 @@ class EvalRunnerApp:
             self.root.after(0, self._log, f"Logging in to {base_url} ...")
             token = login(base_url)
 
-            with open(master_path, newline="", encoding="utf-8") as f:
-                rows = list(csv.DictReader(f))
+            rows = _read_test_case_csv(master_path)
             self.root.after(0, self._log, f"Loaded {len(rows)} test case(s). Running...")
 
-            results = run_test_cases(base_url, token, version, rows)
+            results = run_test_cases(
+                base_url, token, version, rows,
+                judge_rate_limit_rpm=self.judge_rate_limit_rpm,
+                on_progress=lambda message: self.root.after(0, self._log, message),
+            )
 
             REPORTS_DIR.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

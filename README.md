@@ -1,3 +1,7 @@
+cd D:\company-projects\TMT-offical
+python -m eval_automation.gui_run
+
+
 # Eval automation
 
 Standalone tool for evaluating the Dolly chatbot - no import dependency on `dolly-ai-backend`,

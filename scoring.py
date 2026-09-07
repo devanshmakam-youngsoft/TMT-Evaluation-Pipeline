@@ -5,28 +5,52 @@ no Azure SDK/CLI/identity dependency at all, so this runs identically on any
 machine or container with zero OS-specific credential handling.
 """
 import json
-from typing import Any, Dict, Optional
+import threading
+from typing import Any, Dict, Optional, Tuple
 
 from openai import OpenAI
 
 from .config import GROQ_API_KEY, GROQ_JUDGE_MODEL
 
 _client: Optional[OpenAI] = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+        with _client_lock:
+            if _client is None:
+                _client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
     return _client
 
 
-def warm_up_client() -> None:
-    """Call once, at app startup - constructing the client alone doesn't open
-    a connection (that only happens on first real request), so this makes
-    one cheap real call (list models) to force the TCP/TLS handshake to
-    happen now, not on the first judged test case."""
-    _get_client().models.list()
+def _to_float(value: Optional[str]) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def warm_up_client() -> Tuple[Optional[float], Optional[float]]:
+    """Call once, at app startup, before any concurrent judging begins.
+    Constructing the client alone doesn't open a connection (that only
+    happens on first real request), so this fires one minimal real chat
+    completion (max_tokens=1) against the judge model - forces the TCP/TLS
+    handshake to happen now instead of on the first judged test case, and
+    reads Groq's own rate-limit headers off that same call (rate limits are
+    per-model, so a cheap /models list call doesn't carry them - confirmed
+    live, only a real chat completion against the actual model does).
+    Returns (requests_per_minute, tokens_per_minute), either None if the
+    headers aren't present."""
+    response = _get_client().chat.completions.with_raw_response.create(
+        model=GROQ_JUDGE_MODEL,
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=1,
+    )
+    requests_per_minute = _to_float(response.headers.get("x-ratelimit-limit-requests"))
+    tokens_per_minute = _to_float(response.headers.get("x-ratelimit-limit-tokens"))
+    return requests_per_minute, tokens_per_minute
 
 
 _JUDGE_SYSTEM_PROMPT = """You are grading a chatbot's answer against the user's question and an expected answer.
@@ -43,6 +67,9 @@ def llm_judge(
     question: str, expected_answer: str, generated_answer: str,
     expected_source: str = "", actual_sources: str = "", remarks: str = "",
 ) -> Dict[str, Any]:
+    """One attempt, no retry here - a RateLimitError propagates to the
+    caller (runner.py's _judge_row), which owns the rate limiter and retry
+    policy, since that's where concurrency is actually coordinated."""
     user_input = (
         f"Question: {question}\n\n"
         f"Expected answer: {expected_answer}\n\n"
