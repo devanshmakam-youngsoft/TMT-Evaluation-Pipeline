@@ -21,6 +21,14 @@ def _get_client() -> OpenAI:
     return _client
 
 
+def warm_up_client() -> None:
+    """Call once, at app startup - constructing the client alone doesn't open
+    a connection (that only happens on first real request), so this makes
+    one cheap real call (list models) to force the TCP/TLS handshake to
+    happen now, not on the first judged test case."""
+    _get_client().models.list()
+
+
 _JUDGE_SYSTEM_PROMPT = """You are grading a chatbot's answer against the user's question and an expected answer.
 Reply with ONLY a JSON object, no other text:
 {"score": <integer 0-10>, "comments": "<short explanation>"}

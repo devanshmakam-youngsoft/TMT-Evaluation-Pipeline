@@ -2,7 +2,11 @@
 plain HTTP - the same /foundry/generate (and, for pipeline_path=regeneration,
 /foundry/retry) endpoints the real chat UI calls, just scripted. Each input
 row produces 1 output row (pipeline_path=generation, the default) or 2
-(pipeline_path=regeneration - one for the generate call, one for the retry)."""
+(pipeline_path=regeneration - one for the generate call, one for the retry).
+
+`version` isn't a column in the input file - it's supplied by the caller at
+run time (watch_and_run.py derives it from the CSV's own filename) and
+stamped onto every output row for that run."""
 import time
 import uuid
 from typing import Any, Dict, List
@@ -44,9 +48,9 @@ def _call_retry(base_url: str, token: str, session_id: str, question_message_id:
     return resp.json()
 
 
-def _base_fields(row: Dict[str, str]) -> Dict[str, str]:
+def _base_fields(version: str, row: Dict[str, str]) -> Dict[str, str]:
     return {
-        "version": (row.get("version") or "").strip(),
+        "version": version,
         "type": (row.get("type") or "").strip(),
         "question": (row.get("question") or "").strip(),
         "expected_answer": (row.get("expected_answer") or "").strip(),
@@ -74,8 +78,8 @@ def _build_row(
     return result_row
 
 
-def run_test_case(base_url: str, token: str, row: Dict[str, str]) -> List[Dict[str, Any]]:
-    base = _base_fields(row)
+def run_test_case(base_url: str, token: str, version: str, row: Dict[str, str]) -> List[Dict[str, Any]]:
+    base = _base_fields(version, row)
     pipeline_path = (row.get("pipeline_path") or "generation").strip().lower()
 
     if not base["question"] or not base["expected_answer"]:
@@ -87,12 +91,15 @@ def run_test_case(base_url: str, token: str, row: Dict[str, str]) -> List[Dict[s
     except Exception as exc:
         return [_build_row(base, "generation", "", "", round(time.perf_counter() - start, 2), f"generate call failed: {exc}")]
 
-    time_taken = round(time.perf_counter() - start, 2)
     if not gen_response.get("success"):
-        return [_build_row(base, "generation", "", "", time_taken, gen_response.get("error") or "generate returned success=false")]
+        return [_build_row(base, "generation", "", "", round(time.perf_counter() - start, 2), gen_response.get("error") or "generate returned success=false")]
 
     generated_answer = gen_response.get("answer") or ""
     actual_sources = ", ".join(s.get("filename", "?") for s in (gen_response.get("sources") or []))
+    # The API's own reported total_time_taken - not a client-side stopwatch
+    # around the HTTP call (that would include network/serialization
+    # overhead this endpoint itself doesn't count).
+    time_taken = gen_response.get("total_time_taken")
     results = [_build_row(base, "generation", generated_answer, actual_sources, time_taken)]
 
     if pipeline_path != "regeneration":
@@ -107,19 +114,19 @@ def run_test_case(base_url: str, token: str, row: Dict[str, str]) -> List[Dict[s
         results.append(_build_row(base, "regeneration", "", "", round(time.perf_counter() - start2, 2), f"retry call failed: {exc}"))
         return results
 
-    time_taken2 = round(time.perf_counter() - start2, 2)
     if not retry_response.get("success"):
-        results.append(_build_row(base, "regeneration", "", "", time_taken2, retry_response.get("error") or "retry returned success=false"))
+        results.append(_build_row(base, "regeneration", "", "", round(time.perf_counter() - start2, 2), retry_response.get("error") or "retry returned success=false"))
         return results
 
     regenerated_answer = retry_response.get("answer") or ""
     regenerated_sources = ", ".join(s.get("filename", "?") for s in (retry_response.get("sources") or []))
+    time_taken2 = retry_response.get("total_time_taken")
     results.append(_build_row(base, "regeneration", regenerated_answer, regenerated_sources, time_taken2))
     return results
 
 
-def run_test_cases(base_url: str, token: str, rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def run_test_cases(base_url: str, token: str, version: str, rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     all_results: List[Dict[str, Any]] = []
     for row in rows:
-        all_results.extend(run_test_case(base_url, token, row))
+        all_results.extend(run_test_case(base_url, token, version, row))
     return all_results

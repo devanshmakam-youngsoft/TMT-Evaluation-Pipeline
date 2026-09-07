@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 .env
+settings.json
 
-incoming/*.csv
-incoming/processed/
+master.csv
 reports/*.csv
+test_case/*
