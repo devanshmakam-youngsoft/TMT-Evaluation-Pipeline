@@ -36,7 +36,7 @@ from .scoring import llm_judge
 
 _EVAL_USER_ID = "eval-runner"
 
-GENERATION_MAX_WORKERS = 20
+GENERATION_MAX_WORKERS = 5
 JUDGE_MAX_WORKERS = 8
 JUDGE_MAX_ATTEMPTS = 3
 
