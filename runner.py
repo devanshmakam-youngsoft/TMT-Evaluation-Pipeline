@@ -95,16 +95,27 @@ def _call_generate(base_url: str, token: str, question: str) -> Dict[str, Any]:
     return resp.json()
 
 
-def _call_retry(base_url: str, token: str, session_id: str, question_message_id: str) -> Dict[str, Any]:
+def _call_retry(base_url: str, token: str, session_id: str, question_message_id: str,version) -> Dict[str, Any]:
     url = f"{base_url}/foundry/users/{_EVAL_USER_ID}/retry"
+
+    version_number = int(version.split(" ")[-1].strip())
+    if version_number <=5:
+            
+        json_to_call = {
+                "session_id": session_id,
+                "question_message_id": question_message_id,
+                "client_attempt_id": str(uuid.uuid4()),
+            }
+    else:
+        json_to_call = {
+            "session_id": session_id,
+            "query_message_id": question_message_id,
+            "client_attempt_id": str(uuid.uuid4()),
+        }
     resp = requests.post(
         url,
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "session_id": session_id,
-            "question_message_id": question_message_id,
-            "client_attempt_id": str(uuid.uuid4()),
-        },
+        json=json_to_call,
         timeout=120,
     )
     resp.raise_for_status()
@@ -209,7 +220,7 @@ def run_test_case(
     start2 = time.perf_counter()
     try:
         retry_response = _call_retry(
-            base_url, token, gen_response.get("session_id"), gen_response.get("question_message_id"),
+            base_url, token, gen_response.get("session_id"), gen_response.get("query_message_id"), version=version
         )
     except Exception as exc:
         on_ungraded_row(_build_ungraded_row(base, "regeneration", "", "", round(time.perf_counter() - start2, 2), f"retry call failed: {exc}"))
