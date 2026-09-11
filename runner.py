@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 from openai import APIError, RateLimitError
 
+from .report_writer import NODE_METRIC_COLUMNS
 from .scoring import llm_judge
 
 _EVAL_USER_ID = "eval-runner"
@@ -81,10 +82,21 @@ def derive_judge_rate_limit(requests_per_minute: Optional[float], tokens_per_min
     return min(candidates) if candidates else DEFAULT_JUDGE_RATE_LIMIT_RPM
 
 
-def _call_generate(base_url: str, token: str, question: str) -> Dict[str, Any]:
+# The first version whose deployed backend exposes /test/generate + /test/retry
+# (TestGenerateResponse.node_metrics) - anything older 404s on those routes, so
+# those runs fall back to the normal endpoints with node_metrics left blank.
+NODE_METRICS_MIN_VERSION = 10
+
+
+def _parse_version_number(version: str) -> int:
+    return int(version.split(" ")[-1].strip())
+
+
+def _call_generate(base_url: str, token: str, question: str, version: str) -> Dict[str, Any]:
     session_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
-    url = f"{base_url}/foundry/users/{_EVAL_USER_ID}/generate"
+    path = "test/generate" if _parse_version_number(version) >= NODE_METRICS_MIN_VERSION else "generate"
+    url = f"{base_url}/foundry/users/{_EVAL_USER_ID}/{path}"
     resp = requests.post(
         url,
         headers={"Authorization": f"Bearer {token}"},
@@ -95,10 +107,11 @@ def _call_generate(base_url: str, token: str, question: str) -> Dict[str, Any]:
     return resp.json()
 
 
-def _call_retry(base_url: str, token: str, session_id: str, question_message_id: str,version) -> Dict[str, Any]:
-    url = f"{base_url}/foundry/users/{_EVAL_USER_ID}/retry"
+def _call_retry(base_url: str, token: str, session_id: str, question_message_id: str, version) -> Dict[str, Any]:
+    version_number = _parse_version_number(version)
+    path = "test/retry" if version_number >= NODE_METRICS_MIN_VERSION else "retry"
+    url = f"{base_url}/foundry/users/{_EVAL_USER_ID}/{path}"
 
-    version_number = int(version.split(" ")[-1].strip())
     if version_number <=5:
             
         json_to_call = {
@@ -136,11 +149,14 @@ def _base_fields(version: str, slno: int, row: Dict[str, str]) -> Dict[str, Any]
 
 def _build_ungraded_row(
     base: Dict[str, Any], pipeline_path: str, generated_answer: str, actual_sources: str,
-    time_taken: Any, error: str = "",
+    time_taken: Any, error: str = "", node_metrics: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
+    node_metrics = node_metrics or {}
     return {
         **base, "pipeline_path": pipeline_path, "generated_answer": generated_answer,
-        "actual_sources": actual_sources, "llm_score": "", "llm_comments": "",
+        "actual_sources": actual_sources,
+        **{col: node_metrics.get(col, "") for col in NODE_METRIC_COLUMNS},
+        "llm_score": "", "llm_comments": "",
         "time_taken_seconds": time_taken, "error": error,
     }
 
@@ -174,14 +190,16 @@ def _judge_row(row: Dict[str, Any], rate_limiter: RateLimiter) -> Dict[str, Any]
             time.sleep(_extract_retry_after(exc) or (2 ** attempt))
         except APIError as exc:
             # e.g. BadRequestError when the model fails to produce valid
-            # JSON for a particular input - a real, occasional Groq failure
-            # mode seen at scale, not a rate-limit issue. Not worth retrying
-            # (usually deterministic for the same input) - fail just this
-            # row's score, never let it crash the whole run.
+            # JSON for a particular input - seen at scale, but not fully
+            # deterministic even at temperature=0, so a retry can succeed
+            # where the previous attempt didn't. Never let it crash the run.
             row["llm_comments"] = f"judge call failed: {exc}"
+            if attempt < JUDGE_MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
+                continue
             return row
 
-    row["llm_comments"] = "judge call failed after retries (rate limited)"
+    row["llm_comments"] = row["llm_comments"] or "judge call failed after retries"
     return row
 
 
@@ -198,7 +216,7 @@ def run_test_case(
 
     start = time.perf_counter()
     try:
-        gen_response = _call_generate(base_url, token, base["question"])
+        gen_response = _call_generate(base_url, token, base["question"], version)
     except Exception as exc:
         on_ungraded_row(_build_ungraded_row(base, "generation", "", "", round(time.perf_counter() - start, 2), f"generate call failed: {exc}"))
         return
@@ -212,7 +230,10 @@ def run_test_case(
     # The API's own reported total_time_taken - not a client-side stopwatch
     # around the HTTP call (that would include network/serialization
     # overhead this endpoint itself doesn't count).
-    on_ungraded_row(_build_ungraded_row(base, "generation", generated_answer, actual_sources, gen_response.get("total_time_taken")))
+    on_ungraded_row(_build_ungraded_row(
+        base, "generation", generated_answer, actual_sources, gen_response.get("total_time_taken"),
+        node_metrics=gen_response.get("node_metrics"),
+    ))
 
     if not is_query:
         return
@@ -220,7 +241,8 @@ def run_test_case(
     start2 = time.perf_counter()
     try:
         retry_response = _call_retry(
-            base_url, token, gen_response.get("session_id"), gen_response.get("query_message_id"), version=version
+            base_url, token, gen_response.get("session_id"),
+            gen_response.get("query_message_id") or gen_response.get("question_message_id"), version=version
         )
     except Exception as exc:
         on_ungraded_row(_build_ungraded_row(base, "regeneration", "", "", round(time.perf_counter() - start2, 2), f"retry call failed: {exc}"))
@@ -232,7 +254,10 @@ def run_test_case(
 
     regenerated_answer = retry_response.get("answer") or ""
     regenerated_sources = ", ".join(s.get("filename", "?") for s in (retry_response.get("sources") or []))
-    on_ungraded_row(_build_ungraded_row(base, "regeneration", regenerated_answer, regenerated_sources, retry_response.get("total_time_taken")))
+    on_ungraded_row(_build_ungraded_row(
+        base, "regeneration", regenerated_answer, regenerated_sources, retry_response.get("total_time_taken"),
+        node_metrics=retry_response.get("node_metrics"),
+    ))
 
 
 def run_test_cases(
