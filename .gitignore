@@ -5,4 +5,5 @@ settings.json
 
 master.csv
 reports/*.csv
-test_case/*
+
+
